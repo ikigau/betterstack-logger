@@ -5,7 +5,7 @@ Plugin URI:  https://prolificdigital.com
 Description: Seamlessly integrate with BetterStack to log messages directly from your WordPress site. Enhance your logging capabilities with ease and precision.
 Short Description: Seamlessly integrate with BetterStack to log messages directly from your WordPress site.
 Tags: betterstack, logger, logging, error, errors, debug, debugging, log, logs, monitoring, monitoring, betterstack logger, betterstack logging, betterstack error logging, betterstack error logger, betterstack debug logging, betterstack debug logger
-Version: 1.0.0
+Version: 1.1.0
 Requires at least: 6.0
 Requires PHP: 8.0
 Tested up to: 6.6
@@ -36,11 +36,12 @@ $betterstack_logger = new BetterStackLogger();
  * @param string $message The message to log.
  */
 if (!function_exists('better_error_log')) {
-  function better_error_log($message) {
+  function better_error_log($message, $context = [], $level = 'error') {
     global $betterstack_logger;
 
     if ($betterstack_logger instanceof BetterStackLogger) {
-      $betterstack_logger->log_error($message);
+      $safe_context = is_array($context) ? $context : [];
+      $betterstack_logger->log_error($message, $safe_context, (string) $level);
     }
   }
 }
@@ -54,11 +55,32 @@ if (!function_exists('better_error_log')) {
  * @param string $message The message to log.
  */
 if (!function_exists('b_log')) {
-  function b_log($message) {
+  function b_log($message, $context = [], $level = 'error') {
     global $betterstack_logger;
 
     if ($betterstack_logger instanceof BetterStackLogger) {
-      $betterstack_logger->log_error($message);
+      $safe_context = is_array($context) ? $context : [];
+      $betterstack_logger->log_error($message, $safe_context, (string) $level);
+    }
+  }
+}
+
+/**
+ * Log a WooCommerce-specific structured event.
+ *
+ * @param string $event
+ * @param string $message
+ * @param array<string, mixed> $context
+ * @param string $level
+ * @return void
+ */
+if (!function_exists('better_wc_log')) {
+  function better_wc_log($event, $message, $context = [], $level = 'error') {
+    global $betterstack_logger;
+
+    if ($betterstack_logger instanceof BetterStackLogger) {
+      $safe_context = is_array($context) ? $context : [];
+      $betterstack_logger->log_woocommerce_event((string) $event, (string) $message, $safe_context, (string) $level);
     }
   }
 }
