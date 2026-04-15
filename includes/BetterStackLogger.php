@@ -15,6 +15,8 @@ class BetterStackLogger {
   private const ENDPOINT = 'https://in.logs.betterstack.com';
   private const MAX_MESSAGE_LENGTH = 2000;
   private const MAX_TRACE_LENGTH = 8000;
+  private const DUPLICATE_TTL_SECONDS = 3;
+  private const DUPLICATE_CACHE_LIMIT = 200;
 
   private const LEVEL_RANK = [
     'debug' => 10,
@@ -25,6 +27,7 @@ class BetterStackLogger {
   ];
 
   private bool $is_transporting = false;
+  // In-memory request-level duplicate suppression cache.
   private array $recent_hashes = [];
   private $previous_exception_handler = null;
 
@@ -97,14 +100,18 @@ class BetterStackLogger {
   }
 
   /**
-   * Custom wp_die handler filter callback.
+   * Returns a wrapped wp_die handler callable that logs then delegates.
    *
-   * @return callable
+   * WordPress sends the active handler through the `wp_die_handler` filter.
+   * This wrapper preserves that handler and adds structured logging first.
+   *
+   * @param callable|string|null $handler Existing wp_die handler from core/filter chain.
+   * @return callable Wrapped handler callable.
    */
   public function betterstack_wp_die_handler($handler = null) {
-    $default_handler = is_callable($handler) ? $handler : '_default_wp_die_handler';
+    $downstream_handler = is_callable($handler) ? $handler : '_default_wp_die_handler';
 
-    return function ($message, $title = '', $args = []) use ($default_handler) {
+    return function ($message, $title = '', $args = []) use ($downstream_handler) {
       if ($this->is_category_enabled('php_errors')) {
         $formatted_message = $this->extract_message($message);
         $this->log(
@@ -119,7 +126,7 @@ class BetterStackLogger {
         );
       }
 
-      call_user_func($default_handler, $message, $title, $args);
+      call_user_func($downstream_handler, $message, $title, $args);
     };
   }
 
@@ -259,11 +266,24 @@ class BetterStackLogger {
       ['sanitize_callback' => [$this, 'sanitize_post_types_csv']]
     );
 
+    register_setting(
+      'betterstack_logger_options_group',
+      'betterstack_include_stack_traces',
+      ['sanitize_callback' => [$this, 'sanitize_yes_no']]
+    );
+
+    register_setting(
+      'betterstack_logger_options_group',
+      'betterstack_max_trace_length',
+      ['sanitize_callback' => [$this, 'sanitize_trace_length']]
+    );
+
     add_settings_section(
       'betterstack_logger_settings_section',
       'Better Stack Configuration',
       function () {
         echo '<p class="description">Use <code>BETTERSTACK_API_KEY</code> in wp-config.php for the most secure token handling. Database token is a fallback.</p>';
+        echo '<p class="description">Logs are sent with WordPress HTTP API using non-blocking mode by default to minimize request impact if Better Stack is slow or unavailable.</p>';
       },
       'betterstack-logger'
     );
@@ -283,6 +303,12 @@ class BetterStackLogger {
     add_settings_field('betterstack_wc_events_enabled', 'WooCommerce Events', function () {
       $this->render_checkbox_field('betterstack_wc_events_enabled', 'Enable checkout/payment/webhook failure logs', 'no');
     }, 'betterstack-logger', 'betterstack_logger_settings_section');
+
+    add_settings_field('betterstack_include_stack_traces', 'Include Stack Traces', function () {
+      $this->render_checkbox_field('betterstack_include_stack_traces', 'Include stack traces for exceptions/errors (recommended in staging)', 'yes');
+    }, 'betterstack-logger', 'betterstack_logger_settings_section');
+
+    add_settings_field('betterstack_max_trace_length', 'Max Trace Length', [$this, 'render_trace_length_field'], 'betterstack-logger', 'betterstack_logger_settings_section');
 
     add_settings_field('betterstack_custom_logs_enabled', 'Custom Debug Logs', function () {
       $this->render_checkbox_field('betterstack_custom_logs_enabled', 'Enable logs from better_error_log() and b_log()', 'yes');
@@ -338,6 +364,8 @@ class BetterStackLogger {
     }
 
     if ($this->is_category_enabled('php_errors')) {
+      $trace = $this->should_include_traces() ? $this->truncate($exception->getTraceAsString(), $this->get_max_trace_length()) : '';
+
       $this->log(
         'critical',
         'Uncaught exception: ' . $exception->getMessage(),
@@ -346,7 +374,7 @@ class BetterStackLogger {
           'exception_class' => get_class($exception),
           'file' => $exception->getFile(),
           'line' => $exception->getLine(),
-          'trace' => $this->truncate($exception->getTraceAsString(), self::MAX_TRACE_LENGTH),
+          'trace' => $trace,
         ],
         'php_errors'
       );
@@ -550,7 +578,10 @@ class BetterStackLogger {
   }
 
   /**
-   * Sends payload using WP HTTP API.
+   * Sends a structured payload to Better Stack using WordPress HTTP API.
+   *
+   * Non-blocking mode is the default to avoid adding request latency to frontend/admin traffic.
+   * Blocking mode is reserved for flows that need immediate feedback (for example, test logs).
    */
   private function send_payload(array $payload, $blocking = false) {
     $token = $this->get_api_key();
@@ -562,27 +593,36 @@ class BetterStackLogger {
       return 'Skipped: recursive transport prevented.';
     }
 
+    $json_body = wp_json_encode($payload);
+    if (!is_string($json_body) || $json_body === '') {
+      return 'Skipped: unable to encode payload.';
+    }
+
+    // Keep transport non-blocking by default to protect frontend/admin request latency.
+    $request_timeout = max(0.1, (float) apply_filters('betterstack_logger_timeout', $blocking ? 4 : 2, (bool) $blocking));
+
     $this->is_transporting = true;
     $response = wp_remote_post(
       self::ENDPOINT,
       [
-        'body' => wp_json_encode($payload),
+        'body' => $json_body,
         'headers' => [
           'Content-Type' => 'application/json',
           'Authorization' => 'Bearer ' . $token,
         ],
-        'timeout' => $blocking ? 4 : 2,
+        'timeout' => $request_timeout,
         'blocking' => (bool) $blocking,
+        'data_format' => 'body',
       ]
     );
     $this->is_transporting = false;
 
-    if (!$blocking) {
-      return 'Log queued for delivery.';
-    }
-
     if (is_wp_error($response)) {
       return 'Log send failed (non-blocking behavior preserved).';
+    }
+
+    if (!$blocking) {
+      return 'Log queued for delivery.';
     }
 
     $http_code = (int) wp_remote_retrieve_response_code($response);
@@ -699,7 +739,11 @@ class BetterStackLogger {
     $safe_context = $this->redact_data($context);
 
     if (isset($safe_context['trace']) && is_string($safe_context['trace'])) {
-      $safe_context['trace'] = $this->truncate($safe_context['trace'], self::MAX_TRACE_LENGTH);
+      if (!$this->should_include_traces()) {
+        unset($safe_context['trace']);
+      } else {
+        $safe_context['trace'] = $this->truncate($safe_context['trace'], $this->get_max_trace_length());
+      }
     }
 
     return $safe_context;
@@ -778,17 +822,28 @@ class BetterStackLogger {
     $now = time();
 
     foreach ($this->recent_hashes as $hash => $timestamp) {
-      if (($now - $timestamp) > 5) {
+      if (($now - $timestamp) > self::DUPLICATE_TTL_SECONDS) {
         unset($this->recent_hashes[$hash]);
       }
     }
 
+    if (count($this->recent_hashes) > self::DUPLICATE_CACHE_LIMIT) {
+      $this->recent_hashes = array_slice($this->recent_hashes, -1 * self::DUPLICATE_CACHE_LIMIT, null, true);
+    }
+
+    $context = isset($payload['context']) && is_array($payload['context']) ? $payload['context'] : [];
     $signature = [
       $payload['level'] ?? '',
       $payload['message'] ?? '',
       $payload['category'] ?? '',
       $payload['hook'] ?? '',
       $payload['request_uri'] ?? '',
+      $context['event'] ?? '',
+      $context['file'] ?? '',
+      $context['line'] ?? '',
+      $context['post_id'] ?? '',
+      $context['order_id'] ?? '',
+      $context['user_id'] ?? '',
     ];
     $hash = md5(wp_json_encode($signature));
 
@@ -887,6 +942,20 @@ class BetterStackLogger {
     return implode(',', array_unique($types));
   }
 
+  public function sanitize_trace_length($value) {
+    $length = absint($value);
+
+    if ($length < 500) {
+      return 500;
+    }
+
+    if ($length > 20000) {
+      return 20000;
+    }
+
+    return $length;
+  }
+
   private function render_checkbox_field($name, $label, $default = 'no') {
     $value = $this->get_yes_no_option($name, $default);
     echo '<label><input type="hidden" name="' . esc_attr($name) . '" value="no" />';
@@ -931,5 +1000,28 @@ class BetterStackLogger {
     $value = get_option('betterstack_event_post_types', 'post,page,product,shop_order');
     echo '<input type="text" name="betterstack_event_post_types" value="' . esc_attr((string) $value) . '" size="50" />';
     echo '<p class="description">Comma-separated post types for save_post logs. Leave empty to allow all post types.</p>';
+  }
+
+  public function render_trace_length_field() {
+    $value = (int) get_option('betterstack_max_trace_length', self::MAX_TRACE_LENGTH);
+    echo '<input type="number" name="betterstack_max_trace_length" value="' . esc_attr((string) $value) . '" min="500" max="20000" step="100" />';
+    echo '<p class="description">Maximum number of characters kept for stack traces.</p>';
+  }
+
+  /**
+   * Determines whether traces are included after applying settings + runtime filter.
+   */
+  private function should_include_traces() {
+    $enabled = $this->get_yes_no_option('betterstack_include_stack_traces', 'yes') === 'yes';
+    return (bool) apply_filters('betterstack_logger_include_traces', $enabled);
+  }
+
+  /**
+   * Returns the trace length cap after applying settings + runtime filter.
+   */
+  private function get_max_trace_length() {
+    $configured = (int) get_option('betterstack_max_trace_length', self::MAX_TRACE_LENGTH);
+    $clamped = $this->sanitize_trace_length($configured);
+    return (int) apply_filters('betterstack_logger_max_trace_length', $clamped);
   }
 }
