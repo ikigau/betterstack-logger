@@ -4,7 +4,7 @@ BetterStack Logger is a lightweight, WordPress-native application observability 
 
 It sends structured JSON logs to Better Stack so you can monitor PHP/WordPress/WooCommerce runtime behavior even when infrastructure logs are not easily accessible.
 
-Current version: `1.1.4`
+Current version: `1.1.6`
 
 ## Scope
 

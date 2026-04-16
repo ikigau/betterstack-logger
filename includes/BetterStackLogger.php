@@ -935,17 +935,17 @@ class BetterStackLogger {
     }
 
     require_once __DIR__ . '/WCLogHandlerBetterStack.php';
-    if (!class_exists('BetterStackWCLogHandler')) {
+    if (!class_exists('BetterStackWCLogHandlerV2')) {
       return $handlers;
     }
 
-    $interfaces = class_implements('BetterStackWCLogHandler');
+    $interfaces = class_implements('BetterStackWCLogHandlerV2');
     if (!is_array($interfaces) || !in_array('WC_Log_Handler_Interface', $interfaces, true)) {
       return $handlers;
     }
 
-    if (!in_array('BetterStackWCLogHandler', $handlers, true)) {
-      $handlers[] = 'BetterStackWCLogHandler';
+    if (!in_array('BetterStackWCLogHandlerV2', $handlers, true)) {
+      $handlers[] = 'BetterStackWCLogHandlerV2';
     }
 
     return $handlers;

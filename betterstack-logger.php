@@ -5,10 +5,10 @@ Plugin URI:  https://github.com/ikigau/betterstack-logger
 Description: Seamlessly integrate with BetterStack to log messages directly from your WordPress site. Enhance your logging capabilities with ease and precision.
 Short Description: Seamlessly integrate with BetterStack to log messages directly from your WordPress site.
 Tags: betterstack, logger, logging, error, errors, debug, debugging, log, logs, monitoring, monitoring, betterstack logger, betterstack logging, betterstack error logging, betterstack error logger, betterstack debug logging, betterstack debug logger
-Version: 1.1.4
+Version: 1.1.6
 Requires at least: 6.0
 Requires PHP: 8.0
-Tested up to: 6.6
+Tested up to: 6.9.4
 Author: Pedro Gaudêncio
 Author URI: https://ikigau.com
 License: GPL-2.0-or-later

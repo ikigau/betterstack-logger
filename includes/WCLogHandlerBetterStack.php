@@ -7,13 +7,13 @@ if (!defined('WPINC')) {
 if (
   class_exists('WC_Log_Handler')
   && interface_exists('WC_Log_Handler_Interface')
-  && !class_exists('BetterStackWCLogHandler')
+  && !class_exists('BetterStackWCLogHandlerV2')
 ) {
   /**
    * Additive WooCommerce log handler that forwards native WooCommerce logger entries
    * into Better Stack through BetterStackLogger's existing pipeline.
    */
-  class BetterStackWCLogHandler extends WC_Log_Handler implements WC_Log_Handler_Interface {
+  class BetterStackWCLogHandlerV2 extends WC_Log_Handler implements WC_Log_Handler_Interface {
 
     /**
      * Handle a WooCommerce log entry.
