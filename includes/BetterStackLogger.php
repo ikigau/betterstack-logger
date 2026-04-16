@@ -939,6 +939,11 @@ class BetterStackLogger {
       return $handlers;
     }
 
+    $interfaces = class_implements('BetterStackWCLogHandler');
+    if (!is_array($interfaces) || !in_array('WC_Log_Handler_Interface', $interfaces, true)) {
+      return $handlers;
+    }
+
     if (!in_array('BetterStackWCLogHandler', $handlers, true)) {
       $handlers[] = 'BetterStackWCLogHandler';
     }

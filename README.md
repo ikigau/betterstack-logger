@@ -4,7 +4,7 @@ BetterStack Logger is a lightweight, WordPress-native application observability 
 
 It sends structured JSON logs to Better Stack so you can monitor PHP/WordPress/WooCommerce runtime behavior even when infrastructure logs are not easily accessible.
 
-Current version: `1.1.2`
+Current version: `1.1.4`
 
 ## Scope
 
@@ -122,6 +122,7 @@ When enabled, BetterStack Logger registers an additional WooCommerce log handler
 Technical registration:
 
 - the plugin hooks `woocommerce_register_log_handlers` to append `BetterStackWCLogHandler`
+- `BetterStackWCLogHandler` is a WooCommerce-compatible handler (`WC_Log_Handler_Interface` contract)
 - `BetterStackWCLogHandler` calls back into `BetterStackLogger::forward_wc_logger_entry(...)`
 - WooCommerce default handlers remain registered and continue writing Status logs
 

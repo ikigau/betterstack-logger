@@ -4,12 +4,16 @@ if (!defined('WPINC')) {
   die;
 }
 
-if (class_exists('WC_Log_Handler') && !class_exists('BetterStackWCLogHandler')) {
+if (
+  class_exists('WC_Log_Handler')
+  && interface_exists('WC_Log_Handler_Interface')
+  && !class_exists('BetterStackWCLogHandler')
+) {
   /**
    * Additive WooCommerce log handler that forwards native WooCommerce logger entries
    * into Better Stack through BetterStackLogger's existing pipeline.
    */
-  class BetterStackWCLogHandler extends WC_Log_Handler {
+  class BetterStackWCLogHandler extends WC_Log_Handler implements WC_Log_Handler_Interface {
 
     /**
      * Handle a WooCommerce log entry.
@@ -33,5 +37,6 @@ if (class_exists('WC_Log_Handler') && !class_exists('BetterStackWCLogHandler')) 
     }
   }
 }
+
 
 
