@@ -5,7 +5,7 @@ Plugin URI:  https://github.com/ikigau/betterstack-logger
 Description: Seamlessly integrate with BetterStack to log messages directly from your WordPress site. Enhance your logging capabilities with ease and precision.
 Short Description: Seamlessly integrate with BetterStack to log messages directly from your WordPress site.
 Tags: betterstack, logger, logging, error, errors, debug, debugging, log, logs, monitoring, monitoring, betterstack logger, betterstack logging, betterstack error logging, betterstack error logger, betterstack debug logging, betterstack debug logger
-Version: 1.1.2
+Version: 1.1.3
 Requires at least: 6.0
 Requires PHP: 8.0
 Tested up to: 6.6
@@ -22,6 +22,14 @@ if (!defined('WPINC')) {
 }
 
 require_once plugin_dir_path(__FILE__) . 'includes/BetterStackLogger.php';
+
+// Load the WooCommerce bridge handler after WooCommerce has initialized.
+// BetterStackLogger still lazy-loads this file as a fallback when registering handlers.
+add_action('woocommerce_loaded', function () {
+  if (class_exists('WC_Log_Handler')) {
+    require_once plugin_dir_path(__FILE__) . 'includes/WCLogHandlerBetterStack.php';
+  }
+});
 
 // Create a global instance of the BetterStackLogger class
 global $betterstack_logger;

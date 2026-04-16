@@ -40,6 +40,8 @@ class BetterStackLogger {
   // In-memory request-level duplicate suppression cache.
   private array $recent_hashes = [];
   private $previous_exception_handler = null;
+  private ?array $cached_plugin_slugs = null;
+  private ?array $cached_mu_plugin_slugs = null;
 
   /**
    * Constructor.
@@ -51,6 +53,7 @@ class BetterStackLogger {
 
     $this->register_error_handlers();
     $this->register_runtime_attribution_hooks();
+    $this->register_woocommerce_logger_bridge_hooks();
     $this->register_wordpress_hooks();
     $this->register_woocommerce_hooks();
   }
@@ -296,6 +299,30 @@ class BetterStackLogger {
       ['sanitize_callback' => [$this, 'sanitize_yes_no']]
     );
 
+    register_setting(
+      'betterstack_logger_options_group',
+      'betterstack_wc_logger_bridge_enabled',
+      ['sanitize_callback' => [$this, 'sanitize_yes_no']]
+    );
+
+    register_setting(
+      'betterstack_logger_options_group',
+      'betterstack_wc_logger_bridge_min_level',
+      ['sanitize_callback' => [$this, 'sanitize_min_level']]
+    );
+
+    register_setting(
+      'betterstack_logger_options_group',
+      'betterstack_wc_logger_bridge_source_allowlist',
+      ['sanitize_callback' => [$this, 'sanitize_source_list_csv']]
+    );
+
+    register_setting(
+      'betterstack_logger_options_group',
+      'betterstack_wc_logger_bridge_source_blocklist',
+      ['sanitize_callback' => [$this, 'sanitize_source_list_csv']]
+    );
+
     add_settings_section(
       'betterstack_logger_settings_section',
       'Better Stack Configuration',
@@ -329,6 +356,14 @@ class BetterStackLogger {
     add_settings_field('betterstack_runtime_attribution_enabled', 'Plugin/Runtime Attribution', function () {
       $this->render_checkbox_field('betterstack_runtime_attribution_enabled', 'Attempt plugin/theme/core origin attribution and enable high-value runtime attribution hooks', 'no');
     }, 'betterstack-logger', 'betterstack_logger_settings_section');
+
+    add_settings_field('betterstack_wc_logger_bridge_enabled', 'WooCommerce Logger Bridge', function () {
+      $this->render_checkbox_field('betterstack_wc_logger_bridge_enabled', 'Forward WooCommerce native logs (Status > Logs) into Better Stack while keeping WooCommerce logging active', 'no');
+    }, 'betterstack-logger', 'betterstack_logger_settings_section');
+
+    add_settings_field('betterstack_wc_logger_bridge_min_level', 'WooCommerce Bridge Min Level', [$this, 'render_wc_bridge_min_level_field'], 'betterstack-logger', 'betterstack_logger_settings_section');
+    add_settings_field('betterstack_wc_logger_bridge_source_allowlist', 'WooCommerce Bridge Source Allowlist', [$this, 'render_wc_bridge_allowlist_field'], 'betterstack-logger', 'betterstack_logger_settings_section');
+    add_settings_field('betterstack_wc_logger_bridge_source_blocklist', 'WooCommerce Bridge Source Blocklist', [$this, 'render_wc_bridge_blocklist_field'], 'betterstack-logger', 'betterstack_logger_settings_section');
 
     add_settings_field('betterstack_max_trace_length', 'Max Trace Length', [$this, 'render_trace_length_field'], 'betterstack-logger', 'betterstack_logger_settings_section');
 
@@ -529,6 +564,61 @@ class BetterStackLogger {
   }
 
   /**
+   * Forwards entries emitted via WooCommerce's native logger (wc_get_logger).
+   *
+   * This is additive: WooCommerce keeps its own handlers (file/DB/etc), and this method
+   * only bridges those same entries into Better Stack.
+   *
+   * @param int|string $timestamp
+   * @param string $level
+   * @param string $message
+   * @param array<string, mixed> $context
+   */
+  public function forward_wc_logger_entry($timestamp, $level, $message, $context = []) {
+    if (!$this->is_wc_logger_bridge_enabled()) {
+      return;
+    }
+
+    $context = is_array($context) ? $context : [];
+    $message = is_string($message) ? $message : (string) $message;
+    $wc_level = sanitize_key((string) $level);
+    $mapped_level = $this->map_wc_level_to_logger_level($wc_level);
+
+    if (!$this->passes_wc_bridge_min_level($mapped_level)) {
+      return;
+    }
+
+    $source = isset($context['source']) ? sanitize_key((string) $context['source']) : 'woocommerce';
+    if (!$this->is_wc_bridge_source_allowed($source)) {
+      return;
+    }
+
+    $source_classification = $this->classify_source_from_wc_log_source($source);
+
+    $wc_context = $context;
+    unset($wc_context['backtrace']);
+
+    $bridge_context = [
+      'event' => 'woocommerce_logger_entry',
+      'log_origin' => 'woocommerce_logger_bridge',
+      'wc_log_level' => $wc_level,
+      'wc_log_source' => $source,
+      'wc_log_timestamp' => is_scalar($timestamp) ? (string) $timestamp : '',
+      'wc_log_context' => $wc_context,
+      'betterstack_category' => 'woocommerce_logger_bridge',
+      'code_source_type' => $source_classification['code_source_type'],
+      'plugin_slug' => $source_classification['plugin_slug'],
+    ];
+
+    $this->log(
+      $mapped_level,
+      $message,
+      $bridge_context,
+      'woocommerce_logger_bridge'
+    );
+  }
+
+  /**
    * WP event handlers.
    */
   public function on_wp_login($user_login, $user) {
@@ -682,6 +772,9 @@ class BetterStackLogger {
       case 'woocommerce_events':
         return $this->get_yes_no_option('betterstack_wc_events_enabled', 'no') === 'yes';
 
+      case 'woocommerce_logger_bridge':
+        return $this->is_wc_logger_bridge_enabled();
+
       case 'custom_debug_logs':
       default:
         return $this->get_yes_no_option('betterstack_custom_logs_enabled', 'yes') === 'yes';
@@ -812,6 +905,45 @@ class BetterStackLogger {
     add_action('http_api_debug', [$this, 'on_http_api_debug'], 10, 5);
     add_action('doing_it_wrong_run', [$this, 'on_doing_it_wrong_run'], 10, 3);
     add_action('deprecated_function_run', [$this, 'on_deprecated_function_run'], 10, 3);
+  }
+
+  /**
+   * Registers additive WooCommerce logger bridge hooks.
+   */
+  private function register_woocommerce_logger_bridge_hooks() {
+    // Register regardless of plugin load order; WooCommerce will apply this filter when available.
+    add_filter('woocommerce_register_log_handlers', [$this, 'register_wc_bridge_handler'], 20, 1);
+  }
+
+  /**
+   * Adds BetterStack handler to WooCommerce logger handlers without replacing existing handlers.
+   *
+   * @param array<int, string> $handlers
+   * @return array<int, string>
+   */
+  public function register_wc_bridge_handler($handlers) {
+    if (!$this->is_wc_logger_bridge_enabled()) {
+      return $handlers;
+    }
+
+    if (!is_array($handlers)) {
+      $handlers = [];
+    }
+
+    if (!class_exists('WC_Log_Handler')) {
+      return $handlers;
+    }
+
+    require_once __DIR__ . '/WCLogHandlerBetterStack.php';
+    if (!class_exists('BetterStackWCLogHandler')) {
+      return $handlers;
+    }
+
+    if (!in_array('BetterStackWCLogHandler', $handlers, true)) {
+      $handlers[] = 'BetterStackWCLogHandler';
+    }
+
+    return $handlers;
   }
 
   /**
@@ -1184,6 +1316,12 @@ class BetterStackLogger {
     return $length;
   }
 
+  public function sanitize_source_list_csv($value) {
+    $value = is_string($value) ? $value : '';
+    $sources = array_filter(array_map('sanitize_key', array_map('trim', explode(',', $value))));
+    return implode(',', array_unique($sources));
+  }
+
   private function render_checkbox_field($name, $label, $default = 'no') {
     $value = $this->get_yes_no_option($name, $default);
     echo '<label><input type="hidden" name="' . esc_attr($name) . '" value="no" />';
@@ -1236,6 +1374,29 @@ class BetterStackLogger {
     echo '<p class="description">Maximum number of characters kept for stack traces.</p>';
   }
 
+  public function render_wc_bridge_min_level_field() {
+    $value = $this->normalize_level((string) get_option('betterstack_wc_logger_bridge_min_level', 'error'));
+
+    echo '<select name="betterstack_wc_logger_bridge_min_level">';
+    foreach (array_keys(self::LEVEL_RANK) as $level) {
+      echo '<option value="' . esc_attr($level) . '" ' . selected($value, $level, false) . '>' . esc_html(ucfirst($level)) . '</option>';
+    }
+    echo '</select>';
+    echo '<p class="description">Only WooCommerce logger entries at or above this mapped level are forwarded.</p>';
+  }
+
+  public function render_wc_bridge_allowlist_field() {
+    $value = get_option('betterstack_wc_logger_bridge_source_allowlist', '');
+    echo '<input type="text" name="betterstack_wc_logger_bridge_source_allowlist" value="' . esc_attr((string) $value) . '" size="50" />';
+    echo '<p class="description">Optional comma-separated WooCommerce log sources to allow (example: mailchimp_woocommerce,shopify_woocommerce_bridge).</p>';
+  }
+
+  public function render_wc_bridge_blocklist_field() {
+    $value = get_option('betterstack_wc_logger_bridge_source_blocklist', '');
+    echo '<input type="text" name="betterstack_wc_logger_bridge_source_blocklist" value="' . esc_attr((string) $value) . '" size="50" />';
+    echo '<p class="description">Optional comma-separated WooCommerce log sources to suppress.</p>';
+  }
+
   /**
    * Determines whether traces are included after applying settings + runtime filter.
    *
@@ -1257,5 +1418,148 @@ class BetterStackLogger {
     $configured = (int) get_option('betterstack_max_trace_length', self::MAX_TRACE_LENGTH);
     $clamped = $this->sanitize_trace_length($configured);
     return (int) apply_filters('betterstack_logger_max_trace_length', $clamped);
+  }
+
+  private function is_wc_logger_bridge_enabled() {
+    return $this->get_yes_no_option('betterstack_wc_logger_bridge_enabled', 'no') === 'yes';
+  }
+
+  private function map_wc_level_to_logger_level($wc_level) {
+    $wc_level = sanitize_key((string) $wc_level);
+
+    switch ($wc_level) {
+      case 'emergency':
+      case 'alert':
+      case 'critical':
+        return 'critical';
+      case 'error':
+        return 'error';
+      case 'warning':
+        return 'warning';
+      case 'notice':
+      case 'info':
+        return 'info';
+      case 'debug':
+      default:
+        return 'debug';
+    }
+  }
+
+  private function passes_wc_bridge_min_level($mapped_level) {
+    $minimum = $this->normalize_level((string) get_option('betterstack_wc_logger_bridge_min_level', 'error'));
+    return self::LEVEL_RANK[$mapped_level] >= self::LEVEL_RANK[$minimum];
+  }
+
+  private function parse_source_list_option($option_name) {
+    $raw = get_option($option_name, '');
+    if (!is_string($raw) || trim($raw) === '') {
+      return [];
+    }
+
+    return array_values(array_unique(array_filter(array_map('sanitize_key', array_map('trim', explode(',', $raw))))));
+  }
+
+  private function is_wc_bridge_source_allowed($source) {
+    $source = sanitize_key((string) $source);
+    $allowlist = $this->parse_source_list_option('betterstack_wc_logger_bridge_source_allowlist');
+    $blocklist = $this->parse_source_list_option('betterstack_wc_logger_bridge_source_blocklist');
+
+    if (!empty($allowlist) && !in_array($source, $allowlist, true)) {
+      return false;
+    }
+
+    if (!empty($blocklist) && in_array($source, $blocklist, true)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private function classify_source_from_wc_log_source($source) {
+    $source = sanitize_key((string) $source);
+    if ($source === '') {
+      return ['code_source_type' => self::SOURCE_CUSTOM, 'plugin_slug' => ''];
+    }
+
+    if ($source === 'woocommerce' || strpos($source, 'wc_') === 0) {
+      return ['code_source_type' => self::SOURCE_PLUGIN, 'plugin_slug' => 'woocommerce'];
+    }
+
+    $plugin_slugs = $this->get_plugin_slugs();
+    foreach ($plugin_slugs as $slug) {
+      if ($source === $slug || strpos($source, $slug) !== false || strpos($slug, $source) !== false) {
+        return ['code_source_type' => self::SOURCE_PLUGIN, 'plugin_slug' => $slug];
+      }
+    }
+
+    $mu_plugin_slugs = $this->get_mu_plugin_slugs();
+    foreach ($mu_plugin_slugs as $slug) {
+      if ($source === $slug || strpos($source, $slug) !== false || strpos($slug, $source) !== false) {
+        return ['code_source_type' => self::SOURCE_MU_PLUGIN, 'plugin_slug' => $slug];
+      }
+    }
+
+    if (strpos($source, 'theme') !== false) {
+      return ['code_source_type' => self::SOURCE_THEME, 'plugin_slug' => ''];
+    }
+
+    return ['code_source_type' => self::SOURCE_CUSTOM, 'plugin_slug' => ''];
+  }
+
+  private function get_plugin_slugs() {
+    if (is_array($this->cached_plugin_slugs)) {
+      return $this->cached_plugin_slugs;
+    }
+
+    $slugs = [];
+    $plugin_dir = wp_normalize_path(WP_PLUGIN_DIR);
+
+    if (is_dir($plugin_dir)) {
+      $entries = @scandir($plugin_dir);
+      if (is_array($entries)) {
+        foreach ($entries as $entry) {
+          if ($entry === '.' || $entry === '..') {
+            continue;
+          }
+
+          $slug = sanitize_key(pathinfo($entry, PATHINFO_FILENAME));
+          if ($slug !== '') {
+            $slugs[] = $slug;
+          }
+        }
+      }
+    }
+
+    $this->cached_plugin_slugs = array_values(array_unique($slugs));
+    return $this->cached_plugin_slugs;
+  }
+
+  private function get_mu_plugin_slugs() {
+    if (is_array($this->cached_mu_plugin_slugs)) {
+      return $this->cached_mu_plugin_slugs;
+    }
+
+    $slugs = [];
+    if (defined('WPMU_PLUGIN_DIR')) {
+      $mu_dir = wp_normalize_path(WPMU_PLUGIN_DIR);
+      if (is_dir($mu_dir)) {
+        $entries = @scandir($mu_dir);
+        if (is_array($entries)) {
+          foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+              continue;
+            }
+
+            $slug = sanitize_key(pathinfo($entry, PATHINFO_FILENAME));
+            if ($slug !== '') {
+              $slugs[] = $slug;
+            }
+          }
+        }
+      }
+    }
+
+    $this->cached_mu_plugin_slugs = array_values(array_unique($slugs));
+    return $this->cached_mu_plugin_slugs;
   }
 }

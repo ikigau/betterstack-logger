@@ -41,6 +41,9 @@ It does **not** capture:
   - `code_source_type` classification: `plugin`, `mu-plugin`, `theme`, `core`, `custom`
   - `plugin_slug` when plugin source can be resolved
   - `origin_file` and `origin_line` when available
+- Optional WooCommerce native logger bridge for entries written through `wc_get_logger()`
+  - mirrors entries that normally appear in `WooCommerce -> Status -> Logs`
+  - preserves existing WooCommerce logging handlers (file/DB) and forwards additively
 
 ## Transport behavior
 
@@ -78,6 +81,9 @@ If `BETTERSTACK_API_KEY` is not set, the plugin falls back to the token stored i
 - Include stack traces toggle
 - Max trace length
 - Plugin/runtime attribution toggle
+- WooCommerce logger bridge toggle
+- WooCommerce logger bridge minimum level
+- WooCommerce logger bridge source allowlist/blocklist
 - Send test log action
 
 Trace controls support both admin settings and runtime filters.
@@ -108,6 +114,37 @@ better_wc_log('payment_failed', 'Payment gateway returned an error', ['order_id'
 ## WooCommerce notes
 
 WooCommerce logging is intentionally failure-focused and opt-in, so it avoids logging every lifecycle event.
+
+## WooCommerce logger bridge
+
+When enabled, BetterStack Logger registers an additional WooCommerce log handler and forwards entries written through WooCommerce's native logger (`wc_get_logger()`) to Better Stack.
+
+Technical registration:
+
+- the plugin hooks `woocommerce_register_log_handlers` to append `BetterStackWCLogHandler`
+- `BetterStackWCLogHandler` calls back into `BetterStackLogger::forward_wc_logger_entry(...)`
+- WooCommerce default handlers remain registered and continue writing Status logs
+
+This is additive behavior:
+
+- WooCommerce native logging stays active
+- existing WooCommerce log handlers are not replaced
+- logs still appear in `WooCommerce -> Status -> Logs` as usual
+
+Forwarded bridge payloads include fields such as:
+
+- `event: woocommerce_logger_entry`
+- `log_origin: woocommerce_logger_bridge`
+- `wc_log_source`
+- `wc_log_level`
+- `wc_log_context` (sanitized/redacted by existing BetterStack pipeline)
+- source attribution fields when inferable (`code_source_type`, `plugin_slug`)
+
+Noise controls:
+
+- bridge enable/disable toggle
+- minimum level threshold for forwarded WooCommerce entries
+- source allowlist and source blocklist
 
 ## Plugin/runtime attribution
 
@@ -163,6 +200,7 @@ add_filter('betterstack_logger_max_trace_length', function ($max_length) {
 - Runtime trace controls and documented filters verified/aligned
 - Metadata normalization check (version/license)
 - Added optional plugin/runtime attribution for runtime failures and selected high-value runtime hooks
+- Added optional WooCommerce native logger bridge to forward `wc_get_logger()` entries to Better Stack
 
 ## License
 
