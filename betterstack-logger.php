@@ -28,12 +28,14 @@ global $betterstack_logger;
 $betterstack_logger = new BetterStackLogger();
 
 /**
- * Log an error message using BetterStackLogger.
+ * Backward-compatible helper for custom application logs.
  *
- * This function allows developers to easily log messages to BetterStack
- * from anywhere in the codebase by calling better_error_log($message).
+ * Existing calls like better_error_log('message') continue to work.
  *
- * @param string $message The message to log.
+ * @param string $message Log message.
+ * @param array<string, mixed> $context Optional structured context.
+ * @param string $level Log level: debug|info|warning|error|critical.
+ * @return void
  */
 if (!function_exists('better_error_log')) {
   function better_error_log($message, $context = [], $level = 'error') {
@@ -47,12 +49,12 @@ if (!function_exists('better_error_log')) {
 }
 
 /**
- * Log an error message using BetterStackLogger.
+ * Shorthand backward-compatible helper for custom application logs.
  *
- * This function provides a shorthand way for developers to log messages to BetterStack
- * from anywhere in the codebase by calling b_log($message).
- *
- * @param string $message The message to log.
+ * @param string $message Log message.
+ * @param array<string, mixed> $context Optional structured context.
+ * @param string $level Log level: debug|info|warning|error|critical.
+ * @return void
  */
 if (!function_exists('b_log')) {
   function b_log($message, $context = [], $level = 'error') {

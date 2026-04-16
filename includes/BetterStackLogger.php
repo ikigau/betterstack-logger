@@ -8,6 +8,11 @@ if (!defined('WPINC')) {
  * BetterStack Logger
  *
  * Lightweight application-level observability for WordPress and WooCommerce.
+ *
+ * Runtime filters:
+ * - betterstack_logger_timeout
+ * - betterstack_logger_include_traces
+ * - betterstack_logger_max_trace_length
  */
 class BetterStackLogger {
 
@@ -17,6 +22,11 @@ class BetterStackLogger {
   private const MAX_TRACE_LENGTH = 8000;
   private const DUPLICATE_TTL_SECONDS = 3;
   private const DUPLICATE_CACHE_LIMIT = 200;
+  private const SOURCE_PLUGIN = 'plugin';
+  private const SOURCE_MU_PLUGIN = 'mu-plugin';
+  private const SOURCE_THEME = 'theme';
+  private const SOURCE_CORE = 'core';
+  private const SOURCE_CUSTOM = 'custom';
 
   private const LEVEL_RANK = [
     'debug' => 10,
@@ -40,6 +50,7 @@ class BetterStackLogger {
     add_filter('wp_die_handler', [$this, 'betterstack_wp_die_handler']);
 
     $this->register_error_handlers();
+    $this->register_runtime_attribution_hooks();
     $this->register_wordpress_hooks();
     $this->register_woocommerce_hooks();
   }
@@ -114,14 +125,15 @@ class BetterStackLogger {
     return function ($message, $title = '', $args = []) use ($downstream_handler) {
       if ($this->is_category_enabled('php_errors')) {
         $formatted_message = $this->extract_message($message);
+        $origin = $this->infer_origin_from_backtrace();
         $this->log(
           'critical',
           'wp_die triggered: ' . $formatted_message,
-          [
+          $this->enrich_origin_context([
             'event' => 'wp_die',
             'title' => is_string($title) ? $title : '',
             'wp_die_args' => is_array($args) ? $this->safe_wp_die_args($args) : [],
-          ],
+          ], $origin['file'], $origin['line']),
           'php_errors'
         );
       }
@@ -278,6 +290,12 @@ class BetterStackLogger {
       ['sanitize_callback' => [$this, 'sanitize_trace_length']]
     );
 
+    register_setting(
+      'betterstack_logger_options_group',
+      'betterstack_runtime_attribution_enabled',
+      ['sanitize_callback' => [$this, 'sanitize_yes_no']]
+    );
+
     add_settings_section(
       'betterstack_logger_settings_section',
       'Better Stack Configuration',
@@ -306,6 +324,10 @@ class BetterStackLogger {
 
     add_settings_field('betterstack_include_stack_traces', 'Include Stack Traces', function () {
       $this->render_checkbox_field('betterstack_include_stack_traces', 'Include stack traces for exceptions/errors (recommended in staging)', 'yes');
+    }, 'betterstack-logger', 'betterstack_logger_settings_section');
+
+    add_settings_field('betterstack_runtime_attribution_enabled', 'Plugin/Runtime Attribution', function () {
+      $this->render_checkbox_field('betterstack_runtime_attribution_enabled', 'Attempt plugin/theme/core origin attribution and enable high-value runtime attribution hooks', 'no');
     }, 'betterstack-logger', 'betterstack_logger_settings_section');
 
     add_settings_field('betterstack_max_trace_length', 'Max Trace Length', [$this, 'render_trace_length_field'], 'betterstack-logger', 'betterstack_logger_settings_section');
@@ -343,12 +365,10 @@ class BetterStackLogger {
     $this->log(
       $this->map_php_error_to_level((int) $errno),
       'PHP runtime error: ' . (string) $errstr,
-      [
+      $this->enrich_origin_context([
         'event' => 'php_error',
         'error_type' => $this->php_error_label((int) $errno),
-        'file' => (string) $errfile,
-        'line' => (int) $errline,
-      ],
+      ], (string) $errfile, (int) $errline),
       'php_errors'
     );
 
@@ -369,13 +389,13 @@ class BetterStackLogger {
       $this->log(
         'critical',
         'Uncaught exception: ' . $exception->getMessage(),
-        [
+        $this->enrich_origin_context([
           'event' => 'uncaught_exception',
           'exception_class' => get_class($exception),
-          'file' => $exception->getFile(),
-          'line' => $exception->getLine(),
+          'file' => (string) $exception->getFile(),
+          'line' => (int) $exception->getLine(),
           'trace' => $trace,
-        ],
+        ], (string) $exception->getFile(), (int) $exception->getLine()),
         'php_errors'
       );
     }
@@ -403,17 +423,108 @@ class BetterStackLogger {
       return;
     }
 
+    $fatal_file = (string) ($error['file'] ?? '');
+    $fatal_line = (int) ($error['line'] ?? 0);
+
     $this->log(
       'critical',
       'Fatal shutdown error: ' . (string) ($error['message'] ?? ''),
-      [
+      $this->enrich_origin_context([
         'event' => 'fatal_shutdown',
         'error_type' => $this->php_error_label((int) $error['type']),
-        'file' => (string) ($error['file'] ?? ''),
-        'line' => (int) ($error['line'] ?? 0),
-      ],
+      ], $fatal_file, $fatal_line),
       'php_errors',
       true
+    );
+  }
+
+  /**
+   * Runtime attribution hooks for high-value plugin-related failures.
+   */
+  public function on_http_api_debug($response, $context, $class, $parsed_args, $url) {
+    if (!$this->is_runtime_attribution_enabled() || !$this->is_category_enabled('php_errors')) {
+      return;
+    }
+
+    if ($context !== 'response') {
+      return;
+    }
+
+    $http_code = 0;
+    $is_failure = false;
+
+    if (is_wp_error($response)) {
+      $is_failure = true;
+    } elseif (is_array($response)) {
+      $http_code = (int) wp_remote_retrieve_response_code($response);
+      $is_failure = $http_code >= 400;
+    }
+
+    if (!$is_failure) {
+      return;
+    }
+
+    $origin = $this->infer_origin_from_backtrace();
+    $context_payload = [
+      'event' => 'http_api_failure',
+      'hook' => 'http_api_debug',
+      'http_code' => $http_code,
+      'transport_class' => is_string($class) ? $class : '',
+      'request_method' => is_array($parsed_args) && isset($parsed_args['method']) ? sanitize_text_field((string) $parsed_args['method']) : '',
+      'target_host' => wp_parse_url((string) $url, PHP_URL_HOST),
+      'target_path' => wp_parse_url((string) $url, PHP_URL_PATH),
+    ];
+
+    if (is_wp_error($response)) {
+      $context_payload['wp_error_codes'] = $response->get_error_codes();
+      $context_payload['wp_error_messages'] = $response->get_error_messages();
+    }
+
+    $this->log(
+      is_wp_error($response) ? 'error' : 'warning',
+      'WordPress HTTP API request failed.',
+      $this->enrich_origin_context($context_payload, $origin['file'], $origin['line']),
+      'php_errors'
+    );
+  }
+
+  public function on_doing_it_wrong_run($function_name, $message, $version) {
+    if (!$this->is_runtime_attribution_enabled() || !$this->is_category_enabled('php_errors')) {
+      return;
+    }
+
+    $origin = $this->infer_origin_from_backtrace();
+    $this->log(
+      'warning',
+      'WordPress doing_it_wrong notice: ' . sanitize_text_field((string) $function_name),
+      $this->enrich_origin_context([
+        'event' => 'doing_it_wrong_run',
+        'hook' => 'doing_it_wrong_run',
+        'function_name' => sanitize_text_field((string) $function_name),
+        'message' => $this->truncate((string) $message, self::MAX_MESSAGE_LENGTH),
+        'version' => sanitize_text_field((string) $version),
+      ], $origin['file'], $origin['line']),
+      'php_errors'
+    );
+  }
+
+  public function on_deprecated_function_run($function, $replacement, $version) {
+    if (!$this->is_runtime_attribution_enabled() || !$this->is_category_enabled('php_errors')) {
+      return;
+    }
+
+    $origin = $this->infer_origin_from_backtrace();
+    $this->log(
+      'warning',
+      'Deprecated function used: ' . sanitize_text_field((string) $function),
+      $this->enrich_origin_context([
+        'event' => 'deprecated_function_run',
+        'hook' => 'deprecated_function_run',
+        'function_name' => sanitize_text_field((string) $function),
+        'replacement' => sanitize_text_field((string) $replacement),
+        'version' => sanitize_text_field((string) $version),
+      ], $origin['file'], $origin['line']),
+      'php_errors'
     );
   }
 
@@ -582,6 +693,9 @@ class BetterStackLogger {
    *
    * Non-blocking mode is the default to avoid adding request latency to frontend/admin traffic.
    * Blocking mode is reserved for flows that need immediate feedback (for example, test logs).
+   *
+   * Applies `betterstack_logger_timeout` with signature:
+   * apply_filters('betterstack_logger_timeout', $timeout, $blocking)
    */
   private function send_payload(array $payload, $blocking = false) {
     $token = $this->get_api_key();
@@ -670,6 +784,10 @@ class BetterStackLogger {
       'user_id' => $user_id,
       'username' => $safe_username,
       'hook' => isset($safe_context['event']) ? $safe_context['event'] : '',
+      'code_source_type' => isset($safe_context['code_source_type']) ? $safe_context['code_source_type'] : '',
+      'plugin_slug' => isset($safe_context['plugin_slug']) ? $safe_context['plugin_slug'] : '',
+      'origin_file' => isset($safe_context['origin_file']) ? $safe_context['origin_file'] : '',
+      'origin_line' => isset($safe_context['origin_line']) ? (int) $safe_context['origin_line'] : 0,
       'context' => $safe_context,
     ];
   }
@@ -681,6 +799,19 @@ class BetterStackLogger {
     set_error_handler([$this, 'handle_php_error']);
     $this->previous_exception_handler = set_exception_handler([$this, 'handle_uncaught_exception']);
     register_shutdown_function([$this, 'handle_shutdown']);
+  }
+
+  /**
+   * Registers additional high-value runtime attribution hooks.
+   */
+  private function register_runtime_attribution_hooks() {
+    if (!$this->is_runtime_attribution_enabled()) {
+      return;
+    }
+
+    add_action('http_api_debug', [$this, 'on_http_api_debug'], 10, 5);
+    add_action('doing_it_wrong_run', [$this, 'on_doing_it_wrong_run'], 10, 3);
+    add_action('deprecated_function_run', [$this, 'on_deprecated_function_run'], 10, 3);
   }
 
   /**
@@ -747,6 +878,99 @@ class BetterStackLogger {
     }
 
     return $safe_context;
+  }
+
+  private function enrich_origin_context(array $context, $file = '', $line = 0) {
+    $origin_file = is_string($file) ? wp_normalize_path($file) : '';
+    $origin_line = (int) $line;
+
+    if ($origin_file !== '') {
+      $context['file'] = $origin_file;
+      $context['line'] = $origin_line;
+      $context['origin_file'] = $origin_file;
+      $context['origin_line'] = $origin_line;
+    }
+
+    if (!$this->is_runtime_attribution_enabled() || $origin_file === '') {
+      return $context;
+    }
+
+    $classification = $this->classify_source_from_file($origin_file);
+    $context['code_source_type'] = $classification['code_source_type'];
+    if ($classification['plugin_slug'] !== '') {
+      $context['plugin_slug'] = $classification['plugin_slug'];
+    }
+
+    return $context;
+  }
+
+  private function classify_source_from_file($file_path) {
+    $normalized = wp_normalize_path((string) $file_path);
+    if ($normalized === '') {
+      return ['code_source_type' => self::SOURCE_CUSTOM, 'plugin_slug' => ''];
+    }
+
+    $plugin_base = wp_normalize_path(WP_PLUGIN_DIR) . '/';
+    if (strpos($normalized, $plugin_base) === 0) {
+      $relative = substr($normalized, strlen($plugin_base));
+      $parts = explode('/', $relative);
+      $slug = isset($parts[0]) ? sanitize_key($parts[0]) : '';
+      return ['code_source_type' => self::SOURCE_PLUGIN, 'plugin_slug' => $slug];
+    }
+
+    if (defined('WPMU_PLUGIN_DIR')) {
+      $mu_base = wp_normalize_path(WPMU_PLUGIN_DIR) . '/';
+      if (strpos($normalized, $mu_base) === 0) {
+        $relative = substr($normalized, strlen($mu_base));
+        $parts = explode('/', $relative);
+        $first = isset($parts[0]) ? $parts[0] : '';
+        $slug = strpos($relative, '/') === false ? sanitize_key(pathinfo($first, PATHINFO_FILENAME)) : sanitize_key($first);
+        return ['code_source_type' => self::SOURCE_MU_PLUGIN, 'plugin_slug' => $slug];
+      }
+    }
+
+    if (function_exists('get_theme_roots')) {
+      $roots = get_theme_roots();
+      if (is_array($roots)) {
+        foreach (array_keys($roots) as $root) {
+          $theme_base = wp_normalize_path(WP_CONTENT_DIR . '/' . ltrim((string) $root, '/')) . '/';
+          if (strpos($normalized, $theme_base) === 0) {
+            return ['code_source_type' => self::SOURCE_THEME, 'plugin_slug' => ''];
+          }
+        }
+      }
+    }
+
+    $theme_root = wp_normalize_path(get_theme_root()) . '/';
+    if (strpos($normalized, $theme_root) === 0) {
+      return ['code_source_type' => self::SOURCE_THEME, 'plugin_slug' => ''];
+    }
+
+    $core_base = wp_normalize_path(ABSPATH);
+    if ($core_base !== '' && strpos($normalized, $core_base) === 0) {
+      return ['code_source_type' => self::SOURCE_CORE, 'plugin_slug' => ''];
+    }
+
+    return ['code_source_type' => self::SOURCE_CUSTOM, 'plugin_slug' => ''];
+  }
+
+  private function infer_origin_from_backtrace() {
+    $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 25);
+    $self_file = wp_normalize_path(__FILE__);
+
+    foreach ($trace as $frame) {
+      $file = isset($frame['file']) ? wp_normalize_path((string) $frame['file']) : '';
+      if ($file === '' || $file === $self_file) {
+        continue;
+      }
+
+      return [
+        'file' => $file,
+        'line' => isset($frame['line']) ? (int) $frame['line'] : 0,
+      ];
+    }
+
+    return ['file' => '', 'line' => 0];
   }
 
   private function extract_message($message) {
@@ -912,6 +1136,10 @@ class BetterStackLogger {
     return $value === 'yes' ? 'yes' : 'no';
   }
 
+  private function is_runtime_attribution_enabled() {
+    return $this->get_yes_no_option('betterstack_runtime_attribution_enabled', 'no') === 'yes';
+  }
+
   public function sanitize_yes_no($value) {
     return $value === 'yes' ? 'yes' : 'no';
   }
@@ -1010,6 +1238,9 @@ class BetterStackLogger {
 
   /**
    * Determines whether traces are included after applying settings + runtime filter.
+   *
+   * Applies `betterstack_logger_include_traces` with signature:
+   * apply_filters('betterstack_logger_include_traces', $enabled)
    */
   private function should_include_traces() {
     $enabled = $this->get_yes_no_option('betterstack_include_stack_traces', 'yes') === 'yes';
@@ -1018,6 +1249,9 @@ class BetterStackLogger {
 
   /**
    * Returns the trace length cap after applying settings + runtime filter.
+   *
+   * Applies `betterstack_logger_max_trace_length` with signature:
+   * apply_filters('betterstack_logger_max_trace_length', $max_length)
    */
   private function get_max_trace_length() {
     $configured = (int) get_option('betterstack_max_trace_length', self::MAX_TRACE_LENGTH);

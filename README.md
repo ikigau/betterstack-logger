@@ -37,6 +37,10 @@ It does **not** capture:
 - Test log action in admin settings
 - Built-in secret redaction (tokens, authorization headers, cookies, passwords, API keys, nonces, payment-related fields)
 - Duplicate suppression for noisy repeated events within a short window
+- Optional plugin/runtime attribution for runtime failures and high-value runtime hooks
+  - `code_source_type` classification: `plugin`, `mu-plugin`, `theme`, `core`, `custom`
+  - `plugin_slug` when plugin source can be resolved
+  - `origin_file` and `origin_line` when available
 
 ## Transport behavior
 
@@ -73,6 +77,7 @@ If `BETTERSTACK_API_KEY` is not set, the plugin falls back to the token stored i
 - WP event post types for `save_post`
 - Include stack traces toggle
 - Max trace length
+- Plugin/runtime attribution toggle
 - Send test log action
 
 Trace controls support both admin settings and runtime filters.
@@ -103,6 +108,27 @@ better_wc_log('payment_failed', 'Payment gateway returned an error', ['order_id'
 ## WooCommerce notes
 
 WooCommerce logging is intentionally failure-focused and opt-in, so it avoids logging every lifecycle event.
+
+## Plugin/runtime attribution
+
+When enabled, BetterStack Logger enriches runtime failure events with source attribution metadata so plugin-caused issues can be triaged centrally without editing each plugin.
+
+Attribution is applied to:
+
+- PHP runtime errors/warnings/notices/deprecations
+- uncaught exceptions
+- fatal shutdown errors
+- `wp_die` events (best-effort via call stack)
+- selected high-value runtime hooks (`http_api_debug` failure paths, `doing_it_wrong_run`, `deprecated_function_run`)
+
+What it can detect well:
+
+- failures that include a concrete file path from plugin/theme/core code
+
+What it cannot guarantee:
+
+- exact origin for every event if stack/file context is incomplete
+- arbitrary private debug/info logs emitted internally by third-party plugins unless surfaced through observable WordPress/PHP events
 
 ## Filters
 
@@ -136,6 +162,7 @@ add_filter('betterstack_logger_max_trace_length', function ($max_length) {
 - Transport and `wp_die` docblock/comment clarity improvements
 - Runtime trace controls and documented filters verified/aligned
 - Metadata normalization check (version/license)
+- Added optional plugin/runtime attribution for runtime failures and selected high-value runtime hooks
 
 ## License
 
