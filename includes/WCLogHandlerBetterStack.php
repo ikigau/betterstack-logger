@@ -13,6 +13,7 @@ if (
    * Additive WooCommerce log handler that forwards native WooCommerce logger entries
    * into Better Stack through BetterStackLogger's existing pipeline.
    */
+  // WooCommerce validates handlers against WC_Log_Handler_Interface and rejects non-conforming classes.
   class BetterStackWCLogHandlerV2 extends WC_Log_Handler implements WC_Log_Handler_Interface {
 
     /**
@@ -21,15 +22,24 @@ if (
      * @param int|string $timestamp Log timestamp.
      * @param string $level Log level.
      * @param string $message Log message.
-     * @param array<string, mixed> $context Additional context.
+     * @param array<string, mixed>|mixed $context Additional context.
      * @return bool
      */
     public function handle($timestamp, $level, $message, $context) {
       global $betterstack_logger;
 
-      if ($betterstack_logger instanceof BetterStackLogger && method_exists($betterstack_logger, 'forward_wc_logger_entry')) {
+      if (
+        class_exists('BetterStackLogger')
+        && $betterstack_logger instanceof BetterStackLogger
+        && method_exists($betterstack_logger, 'forward_wc_logger_entry')
+      ) {
         $safe_context = is_array($context) ? $context : [];
-        $betterstack_logger->forward_wc_logger_entry($timestamp, (string) $level, (string) $message, $safe_context);
+
+        try {
+          $betterstack_logger->forward_wc_logger_entry($timestamp, (string) $level, (string) $message, $safe_context);
+        } catch (Throwable $e) {
+          // Fail quietly to avoid interrupting WooCommerce's native logger pipeline.
+        }
       }
 
       // Always return true so WooCommerce continues processing other handlers.

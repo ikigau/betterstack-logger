@@ -930,7 +930,7 @@ class BetterStackLogger {
       $handlers = [];
     }
 
-    if (!class_exists('WC_Log_Handler')) {
+    if (!class_exists('WC_Log_Handler') || !interface_exists('WC_Log_Handler_Interface')) {
       return $handlers;
     }
 
