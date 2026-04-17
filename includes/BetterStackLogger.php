@@ -939,14 +939,13 @@ class BetterStackLogger {
       return $handlers;
     }
 
-    $interfaces = class_implements('BetterStackWCLogHandlerV2');
-    if (!is_array($interfaces) || !in_array('WC_Log_Handler_Interface', $interfaces, true)) {
-      return $handlers;
+    foreach ($handlers as $handler) {
+      if ($handler instanceof BetterStackWCLogHandlerV2) {
+        return $handlers;
+      }
     }
 
-    if (!in_array('BetterStackWCLogHandlerV2', $handlers, true)) {
-      $handlers[] = 'BetterStackWCLogHandlerV2';
-    }
+    $handlers[] = new BetterStackWCLogHandlerV2();
 
     return $handlers;
   }
