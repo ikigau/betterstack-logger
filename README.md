@@ -4,7 +4,7 @@ BetterStack Logger is a lightweight, WordPress-native application observability 
 
 It sends structured JSON logs to Better Stack so you can monitor PHP/WordPress/WooCommerce runtime behavior even when infrastructure logs are not easily accessible.
 
-Current version: `1.1.9`
+Current version: `1.2.0`
 
 ## Scope
 
@@ -51,6 +51,8 @@ It does **not** capture:
 - Non-blocking transport by default to reduce request latency impact
 - Short timeouts and fail-quiet behavior to protect frontend/admin UX when Better Stack is unavailable
 - Blocking mode is used only for specific paths (for example, manual test action and shutdown fatal attempts)
+- At most 20 entries are sent per request (filter: `betterstack_logger_max_sends_per_request`; `0` disables the limit). Critical and blocking entries are always sent; when entries are dropped, one summary entry with the count is sent at shutdown
+- WooCommerce bridge: sources on the noisy list (`facebook_for_woocommerce`, `swb-status`; filter: `betterstack_logger_wc_bridge_noisy_sources`) are forwarded only at error level and above
 
 ## Installation
 

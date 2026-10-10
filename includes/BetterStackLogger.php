@@ -13,6 +13,8 @@ if (!defined('WPINC')) {
  * - betterstack_logger_timeout
  * - betterstack_logger_include_traces
  * - betterstack_logger_max_trace_length
+ * - betterstack_logger_max_sends_per_request
+ * - betterstack_logger_wc_bridge_noisy_sources
  */
 class BetterStackLogger {
 
@@ -22,6 +24,12 @@ class BetterStackLogger {
   private const MAX_TRACE_LENGTH = 8000;
   private const DUPLICATE_TTL_SECONDS = 3;
   private const DUPLICATE_CACHE_LIMIT = 200;
+  // Each send is an HTTP request made inside the page request (about 80ms on prod), so a
+  // noisy plugin could otherwise add seconds to one request.
+  private const MAX_SENDS_PER_REQUEST = 20;
+  // WooCommerce log sources that log continuously; below error level they are not
+  // forwarded, whatever the bridge minimum level is.
+  private const WC_BRIDGE_NOISY_SOURCES = ['facebook_for_woocommerce', 'swb-status'];
   private const SOURCE_PLUGIN = 'plugin';
   private const SOURCE_MU_PLUGIN = 'mu-plugin';
   private const SOURCE_THEME = 'theme';
@@ -37,6 +45,9 @@ class BetterStackLogger {
   ];
 
   private bool $is_transporting = false;
+  private int $sent_count = 0;
+  private int $suppressed_count = 0;
+  private bool $sending_summary = false;
   // In-memory request-level duplicate suppression cache.
   private array $recent_hashes = [];
   private $previous_exception_handler = null;
@@ -593,6 +604,10 @@ class BetterStackLogger {
       return;
     }
 
+    if (self::LEVEL_RANK[$mapped_level] < self::LEVEL_RANK['error'] && $this->is_wc_bridge_noisy_source($source)) {
+      return;
+    }
+
     $source_classification = $this->classify_source_from_wc_log_source($source);
 
     $wc_context = $context;
@@ -800,6 +815,10 @@ class BetterStackLogger {
       return 'Skipped: recursive transport prevented.';
     }
 
+    if (!$this->claim_send_slot($payload, $blocking)) {
+      return 'Skipped: per-request send limit reached.';
+    }
+
     $json_body = wp_json_encode($payload);
     if (!is_string($json_body) || $json_body === '') {
       return 'Skipped: unable to encode payload.';
@@ -838,6 +857,59 @@ class BetterStackLogger {
     }
 
     return 'Log send returned HTTP ' . $http_code . '.';
+  }
+
+  /**
+   * Counts a send against the per-request limit.
+   *
+   * Blocking sends (test logs, fatal shutdown) and critical entries always go through.
+   * When the limit is first exceeded, one summary entry is sent at shutdown.
+   *
+   * @param array<string, mixed> $payload
+   */
+  private function claim_send_slot(array $payload, $blocking) {
+    $level = isset($payload['level']) ? (string) $payload['level'] : '';
+    if ($blocking || $level === 'critical' || $this->sending_summary) {
+      return true;
+    }
+
+    $limit = (int) apply_filters('betterstack_logger_max_sends_per_request', self::MAX_SENDS_PER_REQUEST);
+    if ($limit < 1 || $this->sent_count < $limit) {
+      $this->sent_count++;
+      return true;
+    }
+
+    if ($this->suppressed_count === 0) {
+      add_action('shutdown', [$this, 'send_suppressed_summary'], 1);
+    }
+    $this->suppressed_count++;
+
+    return false;
+  }
+
+  /**
+   * Reports how many entries the per-request limit dropped.
+   */
+  public function send_suppressed_summary() {
+    if ($this->suppressed_count === 0) {
+      return;
+    }
+
+    $payload = $this->build_payload(
+      'warning',
+      'Better Stack per-request send limit reached; later entries were dropped.',
+      [
+        'event' => 'send_limit_reached',
+        'sent' => $this->sent_count,
+        'dropped' => $this->suppressed_count,
+      ],
+      'custom_debug_logs'
+    );
+    $this->suppressed_count = 0;
+
+    $this->sending_summary = true;
+    $this->send_payload($payload, false);
+    $this->sending_summary = false;
   }
 
   /**
@@ -1477,6 +1549,18 @@ class BetterStackLogger {
     }
 
     return true;
+  }
+
+  /**
+   * Whether a source is on the noisy list (forwarded only at error level and above).
+   */
+  private function is_wc_bridge_noisy_source($source) {
+    $noisy = apply_filters('betterstack_logger_wc_bridge_noisy_sources', self::WC_BRIDGE_NOISY_SOURCES);
+    if (!is_array($noisy)) {
+      return false;
+    }
+
+    return in_array(sanitize_key((string) $source), array_map('sanitize_key', $noisy), true);
   }
 
   private function classify_source_from_wc_log_source($source) {
