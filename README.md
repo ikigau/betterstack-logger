@@ -178,6 +178,10 @@ What it cannot guarantee:
   - Signature: `apply_filters('betterstack_logger_include_traces', $enabled)`
 - `betterstack_logger_max_trace_length` controls trace truncation length
   - Signature: `apply_filters('betterstack_logger_max_trace_length', $max_length)`
+- `betterstack_logger_max_sends_per_request` controls the per-request send limit (`0` disables it)
+  - Signature: `apply_filters('betterstack_logger_max_sends_per_request', $limit)`
+- `betterstack_logger_wc_bridge_noisy_sources` lists WooCommerce sources forwarded only at error level and above
+  - Signature: `apply_filters('betterstack_logger_wc_bridge_noisy_sources', $sources)`
 
 Example:
 
@@ -195,15 +199,26 @@ add_filter('betterstack_logger_max_trace_length', function ($max_length) {
 
 ## Changelog
 
-### 1.1.2
+### 1.2.0
 
-- Final docs/code consistency cleanup
-- Canonical documentation consolidated in `README.md`
-- Transport and `wp_die` docblock/comment clarity improvements
-- Runtime trace controls and documented filters verified/aligned
-- Metadata normalization check (version/license)
-- Added optional plugin/runtime attribution for runtime failures and selected high-value runtime hooks
-- Added optional WooCommerce native logger bridge to forward `wc_get_logger()` entries to Better Stack
+- Limit sends to 20 per request (filter: `betterstack_logger_max_sends_per_request`), always sending critical entries and reporting dropped entries in one summary at shutdown
+- Forward noisy WooCommerce logger sources only at error level and above (filter: `betterstack_logger_wc_bridge_noisy_sources`)
+
+### 1.1.0
+
+- Structured JSON payloads with environment, request metadata, and context
+- PHP runtime, uncaught exception, fatal shutdown, and `wp_die` logging
+- Optional WordPress and WooCommerce event logging, with category toggles and a minimum log level
+- Optional WooCommerce native logger bridge to forward `wc_get_logger()` entries to Better Stack
+- Optional plugin/runtime attribution for runtime failures and selected high-value runtime hooks
+- Secret redaction, duplicate suppression, and non-blocking transport
+- Stack trace controls and documented filters
+- Test log action in settings
+- New optional `$context` and `$level` arguments for the helper functions, plus `better_wc_log()`
+
+### 1.0.0
+
+- Initial release by [Prolific Digital](https://github.com/prolific-digital/betterstack-logger)
 
 ## License
 
